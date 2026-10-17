@@ -2,6 +2,7 @@
 #include <Geode/modify/EditorUI.hpp>
 #include <Geode/utils/web.hpp>
 #include <Geode/utils/async.hpp>
+#include <Geode/utils/general.hpp>
 #include <Geode/ui/TextInput.hpp>
 #include <Geode/ui/Notification.hpp>
 
@@ -27,6 +28,21 @@ struct Decoration {
     float scale;
     float rotation;
 };
+
+std::string trimmed(std::string s) {
+    auto notSpace = [](unsigned char c) { return !std::isspace(c); };
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
+    s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
+    return s;
+}
+
+// If the model wraps its JSON in text or ``` fences, keep only the outermost { ... }
+std::string extractJSON(std::string const& text) {
+    auto first = text.find('{');
+    auto last = text.rfind('}');
+    if (first == std::string::npos || last == std::string::npos || last < first) return text;
+    return text.substr(first, last - first + 1);
+}
 
 void showError(std::string const& message) {
     FLAlertLayer::create("Gemini Deco", message, "OK")->show();
@@ -88,8 +104,10 @@ protected:
         m_mainLayer->addChild(keyLabel);
 
         m_keyInput = TextInput::create(320.f, "Paste your Gemini API key", "bigFont.fnt");
-        m_keyInput->setPasswordMode(true);
+        m_keyInput->setPasswordMode(false);
         m_keyInput->setMaxCharCount(256);
+        // allow every character that can appear in a Google key (letters, digits, - _ .)
+        m_keyInput->setFilter("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.");
         m_keyInput->setString(Mod::get()->getSavedValue<std::string>(kApiKeySaveKey, ""));
         m_keyInput->setPosition(190.f, 143.f);
         m_mainLayer->addChild(m_keyInput);
@@ -123,22 +141,31 @@ protected:
                 m_keyInput->setString("");
             }
         );
+        auto pasteButton = CCMenuItemExt::createSpriteExtra(
+            ButtonSprite::create("Paste key"),
+            [this](CCMenuItemSpriteExtra*) {
+                // read straight from the clipboard, bypassing the game's text box filtering
+                std::string clip = trimmed(geode::utils::clipboard::read());
+                if (clip.empty()) {
+                    showError("Your clipboard is empty. Copy your API key first.");
+                    return;
+                }
+                m_keyInput->setString(clip);
+            }
+        );
+        menu->addChild(pasteButton);
         menu->addChild(generateButton);
         menu->addChild(forgetButton);
         menu->alignItemsHorizontallyWithPadding(12.f);
+        menu->setScale(.85f);
         menu->setPosition(190.f, 16.f);
         m_mainLayer->addChild(menu);
         return true;
     }
 
     void onGenerate() {
-        auto apiKey = std::string(m_keyInput->getString());
-        {
-            auto notSpace = [](unsigned char c) { return !std::isspace(c); };
-            apiKey.erase(apiKey.begin(), std::find_if(apiKey.begin(), apiKey.end(), notSpace));
-            apiKey.erase(std::find_if(apiKey.rbegin(), apiKey.rend(), notSpace).base(), apiKey.end());
-        }
-        auto prompt = std::string(m_promptInput->getString());
+        auto apiKey = trimmed(std::string(m_keyInput->getString()));
+        auto prompt = trimmed(std::string(m_promptInput->getString()));
         if (apiKey.empty()) {
             showError("Enter a Gemini API key first.");
             return;
@@ -156,7 +183,7 @@ protected:
         }
 
         auto bodyResult = matjson::parse(
-            R"({"contents":[{"parts":[{"text":""}]}],"generationConfig":{"responseMimeType":"application/json","maxOutputTokens":8192}})"
+            R"({"contents":[{"parts":[{"text":""}]}],"generationConfig":{"responseMimeType":"application/json","maxOutputTokens":16384}})"
         );
         if (bodyResult.isErr()) {
             showError("Could not prepare the Gemini request.");
@@ -179,13 +206,17 @@ protected:
 
         auto request = web::WebRequest();
         request.header("x-goog-api-key", apiKey);
-        request.header("Content-Type", "application/json");
         request.timeout(std::chrono::seconds(45));
         request.bodyJSON(body);
 
         async::spawn(
             request.post(kGeminiEndpoint),
-            [editor = std::move(editor), keyLen = apiKey.size()](web::WebResponse response) mutable {
+            [editor = std::move(editor), keyLen = apiKey.size(),
+             keyHint = apiKey.size() >= 6 ? fmt::format("{}...{}", apiKey.substr(0, 4), apiKey.substr(apiKey.size() - 2)) : std::string("(too short)")](web::WebResponse response) mutable {
+                if (response.code() == 0) {
+                    showError("Could not reach Google. Check your internet connection and try again.");
+                    return;
+                }
                 if (!response.ok()) {
                     std::string detail;
                     auto errBody = response.string();
@@ -197,7 +228,7 @@ protected:
                             if (msg.isOk()) detail = msg.unwrap();
                         }
                     }
-                    showError(fmt::format("Gemini request failed (HTTP {}).\n{}\n(Key length in game: {}; a normal key is about 39)", response.code(), detail, keyLen));
+                    showError(fmt::format("Gemini request failed (HTTP {}).\n{}\n(Key seen by game: {}, length {})", response.code(), detail, keyHint, keyLen));
                     return;
                 }
 
@@ -220,13 +251,20 @@ protected:
                     showError("Gemini did not return a layout. Try changing your prompt.");
                     return;
                 }
-                auto textResult = partsResult.unwrap().front()["text"].asString();
-                if (textResult.isErr()) {
+                std::string layoutText;
+                for (auto const& part : partsResult.unwrap()) {
+                    auto partText = part.get<std::string>("text");
+                    if (partText.isOk() && !partText.unwrap().empty()) {
+                        layoutText = partText.unwrap();
+                        break;
+                    }
+                }
+                if (layoutText.empty()) {
                     showError("Gemini did not return a layout description.");
                     return;
                 }
 
-                auto layoutResult = matjson::parse(textResult.unwrap());
+                auto layoutResult = matjson::parse(extractJSON(layoutText));
                 if (layoutResult.isErr()) {
                     showError("Gemini's layout was not valid JSON. Try generating again.");
                     return;
