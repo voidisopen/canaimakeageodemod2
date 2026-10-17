@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -132,6 +133,11 @@ protected:
 
     void onGenerate() {
         auto apiKey = std::string(m_keyInput->getString());
+        {
+            auto notSpace = [](unsigned char c) { return !std::isspace(c); };
+            apiKey.erase(apiKey.begin(), std::find_if(apiKey.begin(), apiKey.end(), notSpace));
+            apiKey.erase(std::find_if(apiKey.rbegin(), apiKey.rend(), notSpace).base(), apiKey.end());
+        }
         auto prompt = std::string(m_promptInput->getString());
         if (apiKey.empty()) {
             showError("Enter a Gemini API key first.");
@@ -179,19 +185,19 @@ protected:
 
         async::spawn(
             request.post(kGeminiEndpoint),
-            [editor = std::move(editor)](web::WebResponse response) mutable {
+            [editor = std::move(editor), keyLen = apiKey.size()](web::WebResponse response) mutable {
                 if (!response.ok()) {
-                   std::string detail;
-   auto errBody = response.string();
-   if (errBody.isOk()) {
-       auto parsedErr = matjson::parse(errBody.unwrap());
-       if (parsedErr.isOk()) {
-           auto errRoot = parsedErr.unwrap();
-           auto msg = errRoot["error"]["message"].asString();
-           if (msg.isOk()) detail = msg.unwrap();
-       }
-   }
-   showError(fmt::format("Gemini request failed (HTTP {}).\n{}", response.code(), detail));
+                    std::string detail;
+                    auto errBody = response.string();
+                    if (errBody.isOk()) {
+                        auto parsedErr = matjson::parse(errBody.unwrap());
+                        if (parsedErr.isOk()) {
+                            auto errRoot = parsedErr.unwrap();
+                            auto msg = errRoot["error"]["message"].asString();
+                            if (msg.isOk()) detail = msg.unwrap();
+                        }
+                    }
+                    showError(fmt::format("Gemini request failed (HTTP {}).\n{}\n(Key length in game: {}; a normal key is about 39)", response.code(), detail, keyLen));
                     return;
                 }
 
