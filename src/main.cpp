@@ -181,7 +181,17 @@ protected:
             request.post(kGeminiEndpoint),
             [editor = std::move(editor)](web::WebResponse response) mutable {
                 if (!response.ok()) {
-                    showError(fmt::format("Gemini request failed (HTTP {}). Check your API key and try again.", response.code()));
+                   std::string detail;
+   auto errBody = response.string();
+   if (errBody.isOk()) {
+       auto parsedErr = matjson::parse(errBody.unwrap());
+       if (parsedErr.isOk()) {
+           auto errRoot = parsedErr.unwrap();
+           auto msg = errRoot["error"]["message"].asString();
+           if (msg.isOk()) detail = msg.unwrap();
+       }
+   }
+   showError(fmt::format("Gemini request failed (HTTP {}).\n{}", response.code(), detail));
                     return;
                 }
 
