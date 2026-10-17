@@ -1,0 +1,12 @@
+{
+    "geode": "5.11.1",
+    "gd": {
+        "win": "2.2081"
+    },
+    "id": "seeni.gemini-deco",
+    "name": "Gemini Deco",
+    "version": "v1.0.0",
+    "developer": "seeni",
+    "description": "Generate editable, decoration-only level layouts with Gemini.",
+    "tags": ["editor", "utility", "online"]
+}
